@@ -97,11 +97,24 @@ ComputeWAXS::ComputeWAXS(LAMMPS *lmp, int narg, char **arg) :
   // Set defaults for optional args
   Min2Theta = 0.0;
   Max2Theta = 45;
-  PhiStepSize = 2*M_PI / 100;
+
+  // Default step size for theta is chosen s.t. there are 200 values.
+  ThetaStepSize = (Max2Theta-Min2Theta)/200.0; 
+  nTheta = 200;
+  PhiStepSize = 2.0*MY_PI / 100.0;
+  nPhi = 100;
   radflag = true;
   LP = 1;
   echo = false;   // ?????
+
+  // Default beam direction: [1,0,0].
   beam[0] = 1.0; beam[1] = 0.0; beam[2] = 0.0;
+
+  // Default direction perpendicular to the beam: [0,0,1].
+  beamPerp1[0] = 0.0; beamPerp1[1] = 0.0; beamPerp1[2] = 1.0;
+
+  // Default direction perpendicular to the beam and beamPerp1: [0,1,0].
+  beamPerp2[0] = 0.0; beamPerp2[1] = 1.0; beamPerp2[2] = 0.0;
 
   // c[0] = 1; c[1] = 1; c[2] = 1; // ??????
   // manual = false; // ??????
@@ -145,21 +158,36 @@ ComputeWAXS::ComputeWAXS(LAMMPS *lmp, int narg, char **arg) :
         error->all(FLERR,"Two-theta range must be greater than zero");
 
       iarg += 3;
-    } else if (strcmp(arg[iarg],"PhiStepSize") == 0) {
+    } else if (strcmp(arg[iarg],"nTheta") == 0) {
 
       // Safety net: raise an error if not enough arguments are provided.
       if (iarg+2 > narg) 
         error->all(FLERR,"Illegal Compute WAXS Command");
 
-      PhiStepSize = atof(arg[iarg+1]); 
-
-      // converting to radians if phi value in deg.
-      if (!radflag)
-        PhiStepSize *= (MY_PI/180.0);
+      // NOTE: nTheta must be provided AFTER the Min and Max2Theta values.
+      nTheta = atoi(arg[iarg+1]);
 
       // Check the validity of the values.
-      if (PhiStepSize <= 0)
-        error->all(FLERR,"Phi Stepsize must be greater than zero");
+      if (nTheta <= 0)
+        error->all(FLERR,"nTheta must be greater than zero");
+
+      // Update value of ThetaStepSize by evenly dividing the 2Theta interval.
+      ThetaStepSize = (Max2Theta-Min2Theta)/nTheta ;
+
+      iarg += 2;
+    } else if (strcmp(arg[iarg],"nPhi") == 0) {
+
+      // Safety net: raise an error if not enough arguments are provided.
+      if (iarg+2 > narg) 
+        error->all(FLERR,"Illegal Compute WAXS Command");
+
+      nPhi = atoi(arg[iarg+1]);
+
+      // Check the validity of the values.
+      if (nPhi <= 0)
+        error->all(FLERR,"nPhi must be greater than zero");
+
+      PhiStepSize = 2.0 * MY_PI / nPhi;
 
       iarg += 2;
     } else if (strcmp(arg[iarg],"LP") == 0) {
@@ -189,6 +217,41 @@ ComputeWAXS::ComputeWAXS(LAMMPS *lmp, int narg, char **arg) :
       beam[1] /= beamNorm;
       beam[2] /= beamNorm;
 
+      if (beam[2] == 1.0){
+          beamPerp1[0] = 1.0; 
+          beamPerp1[1] = 0.0; 
+          beamPerp1[2] = 0.0;
+      } else {
+          // Since beam[2] != 1.0 and beam is normalized,
+          // we have the guarantee that dot(beam,Z) != 0
+          // Therefore, with:
+          // beamPerp1 = Z - dot(beam,Z)beam
+          // we are guaranteed that dot(beam, beamPerp1) == 0.
+          beamPerp1[0] = -beam[0];
+          beamPerp1[1] = -beam[1]; 
+          beamPerp1[2] = 1.0-(beam[2]*beam[2]);
+
+          // Normalize beamPerp1
+          double beamPerp1Norm = sqrt(beamPerp1[0]*beamPerp1[0] 
+                                    + beamPerp1[1]*beamPerp1[1]  
+                                    + beamPerp1[2]*beamPerp1[2]);
+          beamPerp1[0] /= beamPerp1Norm;
+          beamPerp1[1] /= beamPerp1Norm;
+          beamPerp1[2] /= beamPerp1Norm;
+      }
+
+      // Direction perpendicular to the beam and beamPerp1
+      beamPerp2[0] = beam[1]*beamPerp1[2]-beam[2]*beamPerp1[1]; 
+      beamPerp2[1] =-beam[0]*beamPerp1[2]+beam[2]*beamPerp1[0]; 
+      beamPerp2[2] = beam[0]*beamPerp1[1]-beam[1]*beamPerp1[0];
+
+      // Normalize beamPerp2
+      double beamPerp2Norm = sqrt(beamPerp2[0]*beamPerp2[0] 
+                                + beamPerp2[1]*beamPerp2[1] 
+                                + beamPerp2[2]*beamPerp2[2]);
+      beamPerp2[0] /= beamPerp2Norm;
+      beamPerp2[1] /= beamPerp2Norm;
+      beamPerp2[2] /= beamPerp2Norm;
       iarg += 4;
 
     // } else if (strcmp(arg[iarg],"c") == 0) {
@@ -292,16 +355,19 @@ ComputeWAXS::ComputeWAXS(LAMMPS *lmp, int narg, char **arg) :
   // size_array_rows = nRows;
   // size_array_cols = 2;
 
-  // if (me == 0) {
-  //   if (screen && echo) {
-  //     fprintf(screen,"-----\nCompute WAXS id:%s, # of atoms:%d, # of relp:%d\n",id,natoms,nRows);
-  //     fprintf(screen,"Reciprocal point spacing in k1,k2,k3 = %g %g %g\n-----\n",
-  //             dK[0], dK[1], dK[2]);
-  //   }
-  // }
+  if (me == 0) {
+    if (screen && echo) {
+      fprintf(screen,"-----\nCompute WAXS id:%s, # of atoms:%d, # of relp:%d\n",id,natoms,nRows);
+    }
+  }
 
-  memory->create(array,size_array_rows,size_array_cols,"xrd:array");
-  memory->create(store_tmp,3*size_array_rows,"xrd:store_tmp");
+  // Dimension of the 2D output array: 
+  //   Rows = (# of theta values) x (# of phi values)
+  //   Columns = 3 (theta, phi, intensity)
+  size_array_rows = nTheta * nPhi;
+  size_array_cols = 3;
+  memory->create(array,size_array_rows,size_array_cols,"waxs:array");
+  memory->create(store_tmp,3*size_array_rows /* store local qx, qy, qz*/,"waxs:store_tmp");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -317,39 +383,61 @@ ComputeWAXS::~ComputeWAXS()
 
 void ComputeWAXS::init()
 {
+  int i=0;
+  for(double th=Min2Theta; th<Max2Theta; th += ThetaStepSize){
+      for(double phi=0; phi<(2.0 * MY_PI); phi += PhiStepSize){
 
-  int mmax = (2*Knmax[0]+1)*(2*Knmax[1]+1)*(2*Knmax[2]+1);
-  double K[3];
-  double dinv2 = 0.0;
-  double ang = 0.0;
-
-  double convf = 360 / MY_PI;
-  if (radflag ==1) {
-  convf = 1;
+          double Q_S0 = cos(2*th);
+          double Q_TU0 = sin(2*th);
+          double Q_T0  = cos(phi)*Q_TU0;
+          double Q_U0 = sin(phi)*Q_TU0;
+          std::vector<double> output(3,0);
+          for(size_t i=0; i<S0.size(); i++){
+              output[i] = Q_S0*S0[i] + Q_T0*T0[i] + Q_U0*U0[i];
+          }
+          double qn = 4*M_PI*sin(th)/LAMBDA;
+          vector<double> s = polarToCart(th,phi);
+          store_tmp[3*n    ] = qn*(s[0]-S0[0]);
+          store_tmp[3*n + 1] = qn*(s[0]-S0[0]);
+          store_tmp[3*n + 2] = qn*(s[0]-S0[0]);
+          Is[i][j] = I(data, qn*(s[0]-S0[0]), qn*(s[1]-S0[1]), qn*(s[2]-S0[2]), th);
+      }
   }
 
-  int n = 0;
-  for (int m = 0; m < mmax; m++) {
-    int k = m%(2*Knmax[2]+1);
-    int j = (m%((2*Knmax[2]+1)*(2*Knmax[1]+1))-k)/(2*Knmax[2]+1);
-    int i = (m-j*(2*Knmax[2]+1)-k)/((2*Knmax[2]+1)*(2*Knmax[1]+1))-Knmax[0];
-    j = j-Knmax[1];
-    k = k-Knmax[2];
-    K[0] = i * dK[0];
-    K[1] = j * dK[1];
-    K[2] = k * dK[2];
-    dinv2 = (K[0] * K[0] + K[1] * K[1] + K[2] * K[2]);
-    if  (4 >= dinv2 * lambda * lambda) {
-       ang = asin(lambda * sqrt(dinv2) * 0.5);
-       if ((ang <= Max2Theta) && (ang >= Min2Theta)) {
-          store_tmp[3*n] = k;
-          store_tmp[3*n+1] = j;
-          store_tmp[3*n+2] = i;
-          array[n][0] = ang * convf;
-          n++;
-       }
-    }
-  }
+  // int mmax = (2*Knmax[0]+1)*(2*Knmax[1]+1)*(2*Knmax[2]+1);
+  // double K[3];
+  // double dinv2 = 0.0;
+  // double ang = 0.0;
+
+  // double convf = 360 / MY_PI;
+  // if (radflag ==1) {
+  // convf = 1;
+  // }
+
+
+
+  // int n = 0;
+  // for (int m = 0; m < mmax; m++) {
+  //   int k = m%(2*Knmax[2]+1);
+  //   int j = (m%((2*Knmax[2]+1)*(2*Knmax[1]+1))-k)/(2*Knmax[2]+1);
+  //   int i = (m-j*(2*Knmax[2]+1)-k)/((2*Knmax[2]+1)*(2*Knmax[1]+1))-Knmax[0];
+  //   j = j-Knmax[1];
+  //   k = k-Knmax[2];
+  //   K[0] = i * dK[0];
+  //   K[1] = j * dK[1];
+  //   K[2] = k * dK[2];
+  //   dinv2 = (K[0] * K[0] + K[1] * K[1] + K[2] * K[2]);
+  //   if  (4 >= dinv2 * lambda * lambda) {
+  //      ang = asin(lambda * sqrt(dinv2) * 0.5);
+  //      if ((ang <= Max2Theta) && (ang >= Min2Theta)) {
+  //         store_tmp[3*n] = k;
+  //         store_tmp[3*n+1] = j;
+  //         store_tmp[3*n+2] = i;
+  //         array[n][0] = ang * convf;
+  //         n++;
+  //      }
+  //   }
+  // }
  if (n != size_array_rows)
      error->all(FLERR,"Compute WAXS compute_array() rows mismatch");
 
